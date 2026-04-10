@@ -114,7 +114,7 @@ Open [http://localhost:3000](http://localhost:3000) — you play White, the engi
 
 ---
 
-## Known Limitations
+## Known Limitations and Future Work
 
 - No castling or en passant (planned)
 - Engine state is stored in-memory on the server — refreshing resets the game
