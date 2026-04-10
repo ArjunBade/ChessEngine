@@ -4,17 +4,20 @@ from pydantic import BaseModel
 
 app = FastAPI()
 
-# Allow all origins
-origins = ["*"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Chessboard setup
-chess_board = [
+# Material values (centipawns, from white's perspective)
+PIECE_VALUES = {
+    'P': 100, 'N': 320, 'B': 330, 'R': 500, 'Q': 900, 'K': 20000,
+    'p': -100, 'n': -320, 'b': -330, 'r': -500, 'q': -900, 'k': -20000,
+}
+
+INITIAL_BOARD = [
     ["r", "n", "b", "q", "k", "b", "n", "r"],
     ["p", "p", "p", "p", "p", "p", "p", "p"],
     [".", ".", ".", ".", ".", ".", ".", "."],
@@ -22,10 +25,14 @@ chess_board = [
     [".", ".", ".", ".", ".", ".", ".", "."],
     [".", ".", ".", ".", ".", ".", ".", "."],
     ["P", "P", "P", "P", "P", "P", "P", "P"],
-    ["R", "N", "B", "Q", "K", "B", "N", "R"]
+    ["R", "N", "B", "Q", "K", "B", "N", "R"],
 ]
 
-turn = "white"  # White starts
+chess_board = [row[:] for row in INITIAL_BOARD]
+turn = "white"
+game_over = False
+game_winner = None
+
 
 class Move(BaseModel):
     from_row: int
@@ -33,119 +40,270 @@ class Move(BaseModel):
     to_row: int
     to_col: int
 
-def is_valid_move(move: Move):
-    piece = chess_board[move.from_row][move.from_col]
-    target = chess_board[move.to_row][move.to_col]
 
+# Move generation
+
+def _sliding(board, row, col, directions, is_white):
+    moves = []
+    for dr, dc in directions:
+        nr, nc = row + dr, col + dc
+        while 0 <= nr < 8 and 0 <= nc < 8:
+            t = board[nr][nc]
+            if t == ".":
+                moves.append((row, col, nr, nc))
+            elif (is_white and t.islower()) or (not is_white and t.isupper()):
+                moves.append((row, col, nr, nc))
+                break
+            else:
+                break
+            nr += dr
+            nc += dc
+    return moves
+
+
+def get_piece_moves(board, row, col):
+    """Pseudo-legal moves for the piece at (row, col) — does not check for leaving king in check."""
+    piece = board[row][col]
     if piece == ".":
-        return False, "No piece at the selected square."
-
+        return []
     is_white = piece.isupper()
+    p = piece.lower()
+    moves = []
 
-    # Turn enforcement
-    if (turn == "white" and not piece.isupper()) or (turn == "black" and piece.isupper()):
-        return False, f"It's {turn}'s turn."
+    def reachable(nr, nc):
+        if not (0 <= nr < 8 and 0 <= nc < 8):
+            return False
+        t = board[nr][nc]
+        return t == "." or (is_white and t.islower()) or (not is_white and t.isupper())
 
-    # Cannot capture your own piece
-    if target != "." and (target.isupper() == is_white):
-        return False, "Cannot capture your own piece."
+    if p == "p":
+        direction = -1 if is_white else 1
+        start_row = 6 if is_white else 1
+        nr = row + direction
+        if 0 <= nr < 8 and board[nr][col] == ".":
+            moves.append((row, col, nr, col))
+            nr2 = row + 2 * direction
+            if row == start_row and board[nr2][col] == ".":
+                moves.append((row, col, nr2, col))
+        for dc in (-1, 1):
+            nr, nc = row + direction, col + dc
+            if 0 <= nr < 8 and 0 <= nc < 8 and board[nr][nc] != ".":
+                t = board[nr][nc]
+                if (is_white and t.islower()) or (not is_white and t.isupper()):
+                    moves.append((row, col, nr, nc))
 
-    # Example: Pawn movement rules
-    if piece == "P":
-        # Pawn capture
-        if move.to_row == move.from_row - 1 and abs(move.to_col - move.from_col) == 1 and target != ".":
-            return True, "Valid move."
-        # Regular pawn move
-        if move.to_row == move.from_row - 1 and move.from_col == move.to_col and target == ".":
-            return True, "Valid move."
-        # Initial two-square pawn move
-        if move.from_row == 6 and move.to_row == 4 and move.from_col == move.to_col and target == ".":
-            return True, "Valid move."
-    elif piece == "p":
-        # Pawn capture
-        if move.to_row == move.from_row + 1 and abs(move.to_col - move.from_col) == 1 and target != ".":
-            return True, "Valid move."
-        # Regular pawn move
-        if move.to_row == move.from_row + 1 and move.from_col == move.to_col and target == ".":
-            return True, "Valid move."
-        # Initial two-square pawn move
-        if move.from_row == 1 and move.to_row == 3 and move.from_col == move.to_col and target == ".":
-            return True, "Valid move."
-    elif piece == "R" or piece == "r":
-        # Rook moves: horizontally or vertically
-        if move.from_row == move.to_row or move.from_col == move.to_col:
-            return True, "Valid move."
-    elif piece == "N" or piece == "n":
-        # Knight moves: "L" shape (2x1)
-        if abs(move.from_row - move.to_row) == 2 and abs(move.from_col - move.to_col) == 1:
-            return True, "Valid move."
-        if abs(move.from_row - move.to_row) == 1 and abs(move.from_col - move.to_col) == 2:
-            return True, "Valid move."
-    elif piece == "B" or piece == "b":
-        # Bishop moves: diagonally
-        if abs(move.from_row - move.to_row) == abs(move.from_col - move.to_col):
-            return True, "Valid move."
-    elif piece == "Q" or piece == "q":
-        # Queen moves: horizontally, vertically, or diagonally
-        if abs(move.from_row - move.to_row) == abs(move.from_col - move.to_col) or move.from_row == move.to_row or move.from_col == move.to_col:
-            return True, "Valid move."
-    elif piece == "K" or piece == "k":
-        # King moves: one square in any direction
-        if abs(move.from_row - move.to_row) <= 1 and abs(move.from_col - move.to_col) <= 1:
-            return True, "Valid move."
+    elif p == "n":
+        for dr, dc in ((-2,-1),(-2,1),(-1,-2),(-1,2),(1,-2),(1,2),(2,-1),(2,1)):
+            if reachable(row + dr, col + dc):
+                moves.append((row, col, row + dr, col + dc))
 
-    return False, "Invalid move for this piece."
+    elif p == "r":
+        moves.extend(_sliding(board, row, col, ((0,1),(0,-1),(1,0),(-1,0)), is_white))
 
-def check_winner():
-    # Check for checkmate or stalemate (basic logic)
-    black_king = any("k" in row for row in chess_board)
-    white_king = any("K" in row for row in chess_board)
+    elif p == "b":
+        moves.extend(_sliding(board, row, col, ((1,1),(1,-1),(-1,1),(-1,-1)), is_white))
 
-    if not black_king:
-        return "white wins!"
-    if not white_king:
-        return "black wins!"
-    return None  # No winner yet
+    elif p == "q":
+        moves.extend(_sliding(board, row, col,
+            ((0,1),(0,-1),(1,0),(-1,0),(1,1),(1,-1),(-1,1),(-1,-1)), is_white))
+
+    elif p == "k":
+        for dr in (-1, 0, 1):
+            for dc in (-1, 0, 1):
+                if dr == 0 and dc == 0:
+                    continue
+                if reachable(row + dr, col + dc):
+                    moves.append((row, col, row + dr, col + dc))
+
+    return moves
+
+
+def get_all_pseudo_moves(board, is_white):
+    moves = []
+    for r in range(8):
+        for c in range(8):
+            piece = board[r][c]
+            if piece == "." or (piece.isupper() != is_white):
+                continue
+            moves.extend(get_piece_moves(board, r, c))
+    return moves
+
+
+# Board helpers
+
+def apply_move(board, from_row, from_col, to_row, to_col):
+    """Return a new board with the move applied (with pawn promotion to queen)."""
+    b = [row[:] for row in board]
+    piece = b[from_row][from_col]
+    b[from_row][from_col] = "."
+    b[to_row][to_col] = piece
+    if piece == "P" and to_row == 0:
+        b[to_row][to_col] = "Q"
+    elif piece == "p" and to_row == 7:
+        b[to_row][to_col] = "q"
+    return b
+
+
+def find_king(board, is_white):
+    king = "K" if is_white else "k"
+    for r in range(8):
+        for c in range(8):
+            if board[r][c] == king:
+                return r, c
+    return None
+
+
+def is_in_check(board, is_white):
+    pos = find_king(board, is_white)
+    if not pos:
+        return True
+    kr, kc = pos
+    for move in get_all_pseudo_moves(board, not is_white):
+        if move[2] == kr and move[3] == kc:
+            return True
+    return False
+
+
+def get_legal_moves(board, is_white):
+    """Only moves that do not leave own king in check."""
+    legal = []
+    for move in get_all_pseudo_moves(board, is_white):
+        nb = apply_move(board, *move)
+        if not is_in_check(nb, is_white):
+            legal.append(move)
+    return legal
+
+
+def get_game_status(board, is_white_turn):
+    """Returns (status_string, winner_string_or_None)."""
+    legal = get_legal_moves(board, is_white_turn)
+    in_check = is_in_check(board, is_white_turn)
+    if not legal:
+        if in_check:
+            winner = "black wins!" if is_white_turn else "white wins!"
+            return "checkmate", winner
+        return "stalemate", "draw"
+    if in_check:
+        return "check", None
+    return "ongoing", None
+
+# Engine — minimax with alpha-beta pruning
+
+def evaluate(board):
+    score = 0
+    for row in board:
+        for piece in row:
+            score += PIECE_VALUES.get(piece, 0)
+    return score
+
+
+def minimax(board, depth, alpha, beta, maximizing):
+    """
+    Minimax with alpha-beta pruning.
+    maximizing=True  → white's turn (maximise score)
+    maximizing=False → black's turn (minimise score)
+    Returns (score, best_move).
+    """
+    is_white = maximizing
+    legal = get_legal_moves(board, is_white)
+
+    if not legal:
+        if is_in_check(board, is_white):
+            # Checkmate — heavily penalise the side that is mated
+            return (10000 if not maximizing else -10000), None
+        return 0, None  # Stalemate
+
+    if depth == 0:
+        return evaluate(board), None
+
+    best_move = None
+    if maximizing:
+        best = float("-inf")
+        for move in legal:
+            score, _ = minimax(apply_move(board, *move), depth - 1, alpha, beta, False)
+            if score > best:
+                best, best_move = score, move
+            alpha = max(alpha, score)
+            if beta <= alpha:
+                break
+        return best, best_move
+    else:
+        best = float("inf")
+        for move in legal:
+            score, _ = minimax(apply_move(board, *move), depth - 1, alpha, beta, True)
+            if score < best:
+                best, best_move = score, move
+            beta = min(beta, score)
+            if beta <= alpha:
+                break
+        return best, best_move
+
+
+# API endpoints
 
 @app.post("/new-game")
 def new_game():
-    global chess_board, turn
-    turn = "white"  # Reset turn to white
-    chess_board = [
-        ["r", "n", "b", "q", "k", "b", "n", "r"],
-        ["p", "p", "p", "p", "p", "p", "p", "p"],
-        [".", ".", ".", ".", ".", ".", ".", "."],
-        [".", ".", ".", ".", ".", ".", ".", "."],
-        [".", ".", ".", ".", ".", ".", ".", "."],
-        [".", ".", ".", ".", ".", ".", ".", "."],
-        ["P", "P", "P", "P", "P", "P", "P", "P"],
-        ["R", "N", "B", "Q", "K", "B", "N", "R"]
-    ]
-    return {"board": chess_board}
+    global chess_board, turn, game_over, game_winner
+    chess_board = [row[:] for row in INITIAL_BOARD]
+    turn = "white"
+    game_over = False
+    game_winner = None
+    return {"board": chess_board, "turn": turn, "status": "ongoing"}
+
 
 @app.post("/make-move")
 def make_move(move: Move):
-    global chess_board, turn
-    valid, message = is_valid_move(move)
+    global chess_board, turn, game_over, game_winner
 
-    if not valid:
-        return {"status": "Invalid move", "message": message, "board": chess_board}
+    if game_over:
+        return {"status": "game_over", "winner": game_winner, "board": chess_board, "turn": turn}
 
-    # Move piece
+    is_white = turn == "white"
     piece = chess_board[move.from_row][move.from_col]
-    chess_board[move.from_row][move.from_col] = "."
-    chess_board[move.to_row][move.to_col] = piece
 
-    # Check winner (checkmate)
-    winner = check_winner()
+    if piece == ".":
+        return {"status": "invalid", "message": "No piece at that square.", "board": chess_board, "turn": turn}
+    if piece.isupper() != is_white:
+        return {"status": "invalid", "message": f"It's {turn}'s turn.", "board": chess_board, "turn": turn}
 
-    if winner:
-        return {"status": "Game Over", "winner": winner, "board": chess_board}
+    requested = (move.from_row, move.from_col, move.to_row, move.to_col)
+    if requested not in get_legal_moves(chess_board, is_white):
+        return {"status": "invalid", "message": "Illegal move.", "board": chess_board, "turn": turn}
 
-    # Switch turn
-    turn = "black" if turn == "white" else "white"
-    return {"status": "Move applied", "board": chess_board}
+    chess_board = apply_move(chess_board, move.from_row, move.from_col, move.to_row, move.to_col)
+    turn = "black" if is_white else "white"
+
+    status, winner = get_game_status(chess_board, turn == "white")
+    if status in ("checkmate", "stalemate"):
+        game_over = True
+        game_winner = winner
+
+    return {"status": status, "winner": winner, "board": chess_board, "turn": turn}
+
 
 @app.get("/engine-move")
 def engine_move():
-    return {"board": chess_board}
+    global chess_board, turn, game_over, game_winner
+
+    if game_over:
+        return {"status": "game_over", "winner": game_winner, "board": chess_board, "turn": turn}
+    if turn != "black":
+        return {"status": "not_engine_turn", "board": chess_board, "turn": turn}
+
+    _, best_move = minimax(chess_board, 3, float("-inf"), float("inf"), False)
+
+    if not best_move:
+        status = "checkmate" if is_in_check(chess_board, False) else "stalemate"
+        game_winner = "white wins!" if status == "checkmate" else "draw"
+        game_over = True
+        return {"status": status, "winner": game_winner, "board": chess_board, "turn": turn}
+
+    chess_board = apply_move(chess_board, *best_move)
+    turn = "white"
+
+    status, winner = get_game_status(chess_board, True)
+    if status in ("checkmate", "stalemate"):
+        game_over = True
+        game_winner = winner
+
+    return {"status": status, "winner": winner, "board": chess_board, "turn": turn}
